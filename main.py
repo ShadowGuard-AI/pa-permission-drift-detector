@@ -60,11 +60,6 @@ def setup_argparse():
         type=str,
         help="Path to the output file to save the report (JSON format).",
     )
-    parser.add_argument(
-        "--strict",
-        action="store_true",
-        help="Enable strict mode: exit immediately if a discrepancy is found.",
-    )
 
     return parser
 
@@ -139,6 +134,7 @@ def check_permissions(target_path, baseline, exclude_spec=None):
               containing the file path, expected permissions, and actual permissions.
     """
     discrepancies = []
+    seen_in_baseline = set()
     console = Console()
 
     table = Table(
@@ -156,9 +152,12 @@ def check_permissions(target_path, baseline, exclude_spec=None):
             # Exclude files based on patterns
             if exclude_spec and exclude_spec.match_file(relative_path):
                 logging.debug(f"Skipping excluded file: {relative_path}")
+                if relative_path in baseline:
+                    seen_in_baseline.add(relative_path)
                 continue
 
             if relative_path in baseline:
+                seen_in_baseline.add(relative_path)
                 expected_permissions = baseline[relative_path]
                 try:
                     actual_permissions = get_file_permissions(filepath)
@@ -189,6 +188,28 @@ def check_permissions(target_path, baseline, exclude_spec=None):
                     "message": "File not found in Baseline",
                 }
                 discrepancies.append(discrepancy)
+
+    # Check the other direction: a baseline entry whose file is absent
+    # from the target is drift (the file was deleted or renamed), and an
+    # empty target against a non empty baseline therefore reports drift
+    # for every baseline entry instead of a clean result.
+    for relative_path in sorted(baseline.keys()):
+        if relative_path not in seen_in_baseline:
+            expected_permissions = baseline[relative_path]
+            discrepancy = {
+                "file": relative_path,
+                "expected_permissions": expected_permissions,
+                "actual_permissions": "missing",
+                "message": "File in baseline not found in target",
+            }
+            discrepancies.append(discrepancy)
+            logging.warning(
+                f"Baseline file missing from target: {relative_path} "
+                f"(Expected: {expected_permissions})"
+            )
+            table.add_row(
+                relative_path, str(expected_permissions), "missing"
+            )
 
     if discrepancies:
         console.print(table)
@@ -253,6 +274,19 @@ def main():
         logging.error(f"Target directory does not exist: {args.target}")
         sys.exit(1)
 
+    if args.output:
+        resolved_output = os.path.realpath(args.output)
+        if resolved_output == os.path.realpath(args.baseline):
+            logging.error(
+                "Output path equals the baseline file. Refusing to overwrite the input."
+            )
+            sys.exit(1)
+        if args.exclude and resolved_output == os.path.realpath(args.exclude):
+            logging.error(
+                "Output path equals the exclusion file. Refusing to overwrite the input."
+            )
+            sys.exit(1)
+
     try:
         baseline = load_baseline(args.baseline)
         exclude_spec = load_exclusion_patterns(args.exclude)
@@ -260,10 +294,6 @@ def main():
 
         if args.output:
             save_report(discrepancies, args.output)
-
-        if discrepancies and args.strict:
-            logging.error("Permission drift detected. Exiting due to strict mode.")
-            sys.exit(1)
 
         if discrepancies:
             sys.exit(1)  # Exit with error code if discrepancies found
