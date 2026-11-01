@@ -147,12 +147,14 @@ def check_permissions(target_path, baseline, exclude_spec=None):
     for root, _, files in os.walk(target_path):
         for filename in files:
             filepath = os.path.join(root, filename)
+            # Baseline keys have to match this relpath output exactly, separators included. A baseline authored on another platform, or with a leading ./ on its keys, matches nothing and every file is reported as not in the baseline.
             relative_path = os.path.relpath(filepath, target_path)
 
             # Exclude files based on patterns
             if exclude_spec and exclude_spec.match_file(relative_path):
                 logging.debug(f"Skipping excluded file: {relative_path}")
                 if relative_path in baseline:
+                    # Marking an excluded baseline file as seen is deliberate on my part: the operator excluded it, so it should not reappear at the end as a missing file. The cost is that a baseline entry can be silently retired just by adding an exclude pattern.
                     seen_in_baseline.add(relative_path)
                 continue
 
@@ -162,6 +164,7 @@ def check_permissions(target_path, baseline, exclude_spec=None):
                 try:
                     actual_permissions = get_file_permissions(filepath)
 
+                    # This is a raw string comparison against whatever the baseline file holds. A baseline written with a leading zero, or with the mode as a JSON number instead of a string, mismatches every file and reports a tree full of drift that is really a formatting difference in the baseline.
                     if actual_permissions != expected_permissions:
                         discrepancy = {
                             "file": relative_path,
@@ -184,6 +187,7 @@ def check_permissions(target_path, baseline, exclude_spec=None):
                 discrepancy = {
                     "file": relative_path,
                     "expected_permissions": "N/A",
+                    # Unlike the baseline branch above, this call is not wrapped in a try. A file that disappears between the walk and this stat raises out of the whole check, and main turns one racing file into a failed run with no report at all.
                     "actual_permissions": get_file_permissions(filepath),
                     "message": "File not found in Baseline",
                 }
@@ -235,6 +239,7 @@ def get_file_permissions(filepath):
     try:
         st = os.stat(filepath)
         permissions = stat.S_IMODE(st.st_mode)
+        # S_IMODE keeps the setuid, setgid, and sticky bits, so a setuid file comes out as four digits here. A baseline written in the usual three digit form will never match it, which I count as correct behaviour: the extra bit is a real difference worth surfacing.
         return oct(permissions)[2:]  # Convert to octal and remove '0o' prefix
     except OSError as e:
         logging.error(f"Error getting permissions for {filepath}: {e}")
